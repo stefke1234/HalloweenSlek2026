@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Halloween Slek Kaart — stabiele versie</title>
+
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+<style>
+  /* basis layout */
+  :root { --header-h: 60px; }
+  html,body { height:100%; margin:0; padding:0; background:#111; color:#fff; font-family: Arial, sans-serif; }
+  header {
+    height:var(--header-h);
+    line-height:var(--header-h);
+    text-align:center;
+    background: linear-gradient(90deg,#ff6600,#cc3300);
+    color:#fff;
+    font-weight:700;
+    font-size:1.25rem;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.6);
+    z-index:2000;
+  }
+
+  /* map: gebruik viewport-calculatie (stabiel op mobiel) */
+  #map {
+    height: calc(100vh - var(--header-h));
+    width: 100%;
+    box-sizing:border-box;
+    border-top: 6px solid #ff6600;
+  }
+
+  /* popup style */
+  .leaflet-popup-content-wrapper {
+    background: rgba(0,0,0,0.9);
+    color: #ffa500;
+    border: 2px solid #ff6600;
+    border-radius: 8px;
+    font-weight: 600;
+    text-align:center;
+  }
+
+  /* pulse animatie voor actieve pompoen */
+  @keyframes pulse { 0%{ transform: scale(1); } 50%{ transform: scale(1.28); } 100%{ transform: scale(1); } }
+  .pulse-icon { animation: pulse 1.2s infinite; transform-origin: center; }
+
+  /* follow-knop styling (Leaflet control) */
+  .leaflet-control-follow {
+    background:#ff6600;
+    color:#fff;
+    padding:6px 10px;
+    font-weight:700;
+    border-radius:6px;
+    border:2px solid #000;
+    cursor:pointer;
+    box-shadow:0 2px 6px rgba(0,0,0,0.4);
+  }
+
+  /* make sure controls are above everything */
+  .leaflet-control { z-index: 3000 !important; }
+
+  /* force user icon pure black if using PNG */
+  .user-marker { filter: brightness(0) saturate(100%); }
+
+  /* accessibility: small screens tweaks */
+  @media (max-width:420px){
+    header { font-size:1.05rem; }
+    .leaflet-control-follow { padding:5px 8px; font-size:0.95rem; }
+  }
+</style>
+</head>
+<body>
+<header>🎃 Halloween Tocht — Slek</header>
+
+<div id="map" aria-label="Halloween kaart"></div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+/*
+  Robuuste, self-contained index.html
+  - Preloads icon PNGs and falls back to inline SVG if PNG missing.
+  - Initializes map only after icons chosen.
+  - Keeps follow + zoom behavior stable (first fix always zooms).
+  - Uses localStorage for visited status (per client).
+*/
+
+/* ---------- Config ---------- */
+const followZoom = 16.5;            // zoomniveau bij volgen
+const withinRadiusMeters = 20;      // actieradius in meters
+const houses = [
+  { id: 1, lat: 51.08680174601165, lon: 5.882762142614233, activiteit: "Pompoen snijden" },
+  { id: 2, lat: 51.086813059686925, lon: 5.886687286215524, activiteit: "Spooktocht" },
+  { id: 3, lat: 51.08913633973181, lon: 5.886122398445942, activiteit: "Trick or Treat" },
+  { id: 4, lat: 51.08556433767571, lon: 5.884686368839152, activiteit: "figuurtjes maken" },
+  { id: 5, lat: 51.08403090709011, lon: 5.884304837280434, activiteit: "figuurtjes maken" },
+  { id: 6, lat: 51.08849791746704, lon: 5.884691669340362, activiteit: "figuurtjes maken" },
+  { id: 7, lat: 51.08743461486377, lon: 5.885671482311417, activiteit: "figuurtjes maken" },
+  { id: 8, lat: 51.088329874217855, lon: 5.881588279499616, activiteit: "figuurtjes maken" }
+];
+
+/* ---------- Helpers ---------- */
+
+// Preload image URL; resolve(true) if loaded, else resolve(false)
+function testImage(url, timeout = 4000) {
+  return new Promise(resolve => {
+    if(!url) return resolve(false);
+    const img = new Image();
+    let done = false;
+    const onOk = () => { if(!done){ done=true; resolve(true); } };
+    const onFail = () => { if(!done){ done=true; resolve(false); } };
+    img.onload = onOk;
+    img.onerror = onFail;
+    img.src = url;
+    // timeout fallback
+    setTimeout(() => { if(!done){ done=true; resolve(false); } }, timeout);
+  });
+}
+
+// Create data-URL SVG fallback for pumpkin active
+function pumpkinActiveSVGDataURL() {
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'>
+    <g>
+      <circle cx='32' cy='32' r='20' fill='#ff8c00' stroke='#000' stroke-width='2'/>
+      <path d='M22 40 C 26 46, 38 46, 42 40' fill='none' stroke='#000' stroke-width='2' stroke-linecap='round'/>
+      <rect x='28' y='12' width='8' height='6' rx='1' ry='1' fill='#064' stroke='#000' stroke-width='1'/>
+    </g></svg>`;
+  return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+}
+
+// visited pumpkin fallback
+function pumpkinVisitedSVGDataURL() {
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'>
+    <g>
+      <circle cx='32' cy='32' r='20' fill='#ff8c00' stroke='#000' stroke-width='2'/>
+      <path d='M22 40 C 26 46, 38 46, 42 40' fill='none' stroke='#000' stroke-width='2' stroke-linecap='round'/>
+      <circle cx='44' cy='20' r='6' fill='#fff' stroke='#000' stroke-width='1'/>
+      <path d='M42 20 L46 24' stroke='#000' stroke-width='1'/>
+    </g></svg>`;
+  return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+}
+
+// user icon fallback (simple black silhouette circle)
+function userSVGDataURL() {
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'>
+    <g>
+      <circle cx='32' cy='22' r='10' fill='#000'/>
+      <path d='M12 52c4-12 20-12 20-12s16 0 20 12' fill='#000'/>
+    </g></svg>`;
+  return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+}
+
+/* ---------- Icon selection (try PNG, fallback to SVG data-url) ---------- */
+
+(async function boot() {
+  try {
+    // Candidate file names (assumes same folder as index.html)
+    const pumpkinActiveFile = 'pumpkin_active.png';
+    const pumpkinVisitedFile = 'pumpkin_visited.png';
+    const userFile = 'user.png';
+
+    // Test if PNGs exist on the server
+    const [hasPumpkinActive, hasPumpkinVisited, hasUser] = await Promise.all([
+      testImage(pumpkinActiveFile),
+      testImage(pumpkinVisitedFile),
+      testImage(userFile)
+    ]);
+
+    const pumpkinActiveUrl = hasPumpkinActive ? pumpkinActiveFile : pumpkinActiveSVGDataURL();
+    const pumpkinVisitedUrl = hasPumpkinVisited ? pumpkinVisitedFile : pumpkinVisitedSVGDataURL();
+    const userUrl = hasUser ? userFile : userSVGDataURL();
+
+    // Create Leaflet icons (sizes reasonable; PNG or SVG data URI both work)
+    const pumpkinActiveIcon = L.icon({
+      iconUrl: pumpkinActiveUrl,
+      iconSize: [36,36],
+      iconAnchor: [18,36],
+      popupAnchor: [0,-34]
+    });
+
+    const pumpkinVisitedIcon = L.icon({
+      iconUrl: pumpkinVisitedUrl,
+      iconSize: [36,36],
+      iconAnchor: [18,36],
+      popupAnchor: [0,-34]
+    });
+
+    const userIcon = L.icon({
+      iconUrl: userUrl,
+      iconSize: [42,56],
+      iconAnchor: [21,56],
+      popupAnchor: [0,-52],
+      className: 'user-marker'
+    });
+
+    // Now initialize map and UI (icons ready)
+    initMap({ pumpkinActiveIcon, pumpkinVisitedIcon, userIcon });
+
+  } catch(err) {
+    console.error('Boot error:', err);
+    alert('Er is een fout bij het initialiseren van de kaart. Kijk in de console voor details.');
+  }
+})();
+
+/* ---------- Map + behaviour ---------- */
+
+function initMap(icons) {
+  const { pumpkinActiveIcon, pumpkinVisitedIcon, userIcon } = icons;
+
+  // create map
+  const map = L.map('map', { preferCanvas: false }).setView([51.087020895545784, 5.883311978811109], followZoom);
+
+  // tile layer
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap contributors'
+  }).addTo(map);
+
+  // create house markers and store refs on houses list
+  houses.forEach(h => {
+    const visited = localStorage.getItem('huis_' + h.id) === 'true';
+    const icon = visited ? pumpkinVisitedIcon : pumpkinActiveIcon;
+    h.marker = L.marker([h.lat, h.lon], { icon }).addTo(map).bindPopup(h.activiteit);
+  });
+
+  // user marker + circle
+  let userMarker = null;
+  const userCircle = L.circle([0,0], {
+    radius: withinRadiusMeters,
+    color: 'orange',
+    fillColor: 'rgba(255,165,0,0.12)',
+    weight: 2
+  }).addTo(map);
+
+  // follow control
+  let isFollowing = true;
+  const FollowControl = L.Control.extend({
+    options: { position: 'topright' },
+    onAdd: function () {
+      const container = L.DomUtil.create('div', 'leaflet-control-follow');
+      container.innerHTML = '📍 Volg mij';
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.on(container, 'click', function (e) {
+        L.DomEvent.stopPropagation(e);
+        L.DomEvent.preventDefault(e);
+        isFollowing = !isFollowing;
+        container.style.background = isFollowing ? '#ff6600' : '#555';
+        if (isFollowing && userMarker) {
+          safeFly(userMarker.getLatLng(), followZoom);
+        }
+      });
+      return container;
+    }
+  });
+  map.addControl(new FollowControl());
+
+  // Helper: safe flyTo with fallback
+  function safeFly(latlng, zoom) {
+    try {
+      if (map.flyTo) {
+        map.flyTo(latlng, zoom, { animate: true, duration: 0.6 });
+      } else {
+        map.setView(latlng, zoom);
+      }
+    } catch (e) {
+      // fallback
+      try { map.setView(latlng, zoom); } catch (err) { console.warn('Fly/setView failed', err); }
+    }
+  }
+
+  // locate/watch
+  map.locate({ setView: false, watch: true, enableHighAccuracy: true });
+
+  let firstFix = true;
+  map.on('locationfound', function (e) {
+    const latlng = e.latlng;
+
+    // create or update user marker
+    if (!userMarker) {
+      userMarker = L.marker(latlng, { icon: userIcon }).addTo(map).bindPopup('Jij bent hier');
+    } else {
+      userMarker.setLatLng(latlng);
+    }
+
+    // update circle
+    userCircle.setLatLng(latlng);
+
+    // first fix: always fly + zoom to followZoom,
+    // subsequent updates: only when isFollowing true
+    if (firstFix) {
+      safeFly(latlng, followZoom);
+      firstFix = false;
+    } else if (isFollowing) {
+      safeFly(latlng, followZoom);
+    }
+
+    // check houses distances & update icons + pulse
+    houses.forEach(house => {
+      const dist = map.distance(latlng, [house.lat, house.lon]);
+      const el = house.marker && house.marker.getElement ? house.marker.getElement() : null;
+      const visited = localStorage.getItem('huis_' + house.id) === 'true';
+
+      if (dist < withinRadiusMeters && !visited) {
+        // mark visited and change icon
+        localStorage.setItem('huis_' + house.id, 'true');
+        house.marker.setIcon(pumpkinVisitedIcon);
+        if (el) el.classList.remove('pulse-icon');
+      } else {
+        // if not visited, show active icon; if visited show visited
+        if (!visited) {
+          house.marker.setIcon(pumpkinActiveIcon);
+          if (el) {
+            // if currently within radius, pulse; otherwise remove pulse
+            if (dist < withinRadiusMeters) el.classList.add('pulse-icon');
+            else el.classList.remove('pulse-icon');
+          }
+        } else {
+          house.marker.setIcon(pumpkinVisitedIcon);
+          if (el) el.classList.remove('pulse-icon');
+        }
+      }
+    });
+  });
+
+  map.on('locationerror', function (err) {
+    console.warn('locate error', err);
+    // Do not block the map; the user can still use it manually
+    // Optionally show a small message / toast here
+  });
+
+  // expose for debugging in console (optional)
+  window.__halloween_map = { map, houses, userCircle };
+}
+</script>
+</body>
+</html>
+
+
+
+
+
